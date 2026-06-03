@@ -1,0 +1,9 @@
+# DEVELOPMENT TOOLS
+
+black
+flake8
+isort
+pytest
+pre-commit
+commitizen
+

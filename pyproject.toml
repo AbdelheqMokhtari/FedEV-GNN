@@ -1,0 +1,31 @@
+[project]
+name = "fedev-gnn"
+version = "0.1.0"
+description = "Federated Graph Neural Networks for Intrusion Detection in Connected Electric Mobility"
+readme = "README.md"
+requires-python = ">=3.10"
+
+[tool.black]
+line-length = 88
+target-version = ["py310"]
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.flake8]
+max-line-length = 88
+extend-ignore = ["E203", "W503"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+version = "0.1.0"
+tag_format = "v$version"
+update_changelog_on_bump = true
+version_files = [
+    "pyproject.toml:version"
+]
+
