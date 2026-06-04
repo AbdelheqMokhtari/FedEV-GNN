@@ -7,5 +7,16 @@ __pycache__/
 # Virtual Env
 .venv/
 
+# IDE
+.vscode/
+
 # Jupyter
 .ipynb_checkpoints/
+
+# Packaging
+*.egg-info/
+dist/
+build/
+
+# Data
+data/raw
