@@ -21,3 +21,7 @@ build/
 # Data
 data/raw
 data/samples
+data/processed
+
+# Documentary
+docs/
