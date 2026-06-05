@@ -15,6 +15,7 @@ Invoked via the data CLI::
 """
 
 import json
+import textwrap
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
@@ -82,15 +83,25 @@ def run() -> None:
     kept = [f for f in SELECTED if f in available_set]
     (PROCESSED_DIR / "selected_features.json").write_text(json.dumps(kept, indent=2))
 
-    print(
-        f"[select] fixed feature set | {len(kept)}/{len(SELECTED)} features confirmed"
-    )
+    GROUP_LABELS = {
+        "behavioral": "Behavioral",
+        "temporal": "Temporal",
+        "content_volume": "Content & Volume",
+    }
+    WIDTH = 72
+    INDENT = "    "
+
+    print(f"\n[select] {len(kept)}/{len(SELECTED)} features confirmed\n")
     for group, feats in GROUPS.items():
         confirmed = [f for f in feats if f in available_set]
-        flag = (
-            f"  ({len(feats) - len(confirmed)} missing)"
-            if len(confirmed) < len(feats)
-            else ""
-        )
-        print(f"  {group:<16}: {', '.join(confirmed)}{flag}")
+        n_total = len(feats)
+        n_ok = len(confirmed)
+        label = GROUP_LABELS.get(group, group)
+        missing_note = f"  ⚠ {n_total - n_ok} missing" if n_ok < n_total else ""
+        header = f"  ── {label} ({n_ok}){missing_note} "
+        print(header + "─" * max(0, WIDTH - len(header) + 2))
+        lines = textwrap.wrap(", ".join(confirmed), width=WIDTH - len(INDENT))
+        for line in lines:
+            print(INDENT + line)
+        print()
     print("[select] wrote data/processed/selected_features.json")
