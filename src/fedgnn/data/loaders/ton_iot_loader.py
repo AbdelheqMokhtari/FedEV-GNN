@@ -1,12 +1,13 @@
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 
 from fedgnn.data.loaders.base_loader import BaseLoader
 
 
 class ToNIoTLoader(BaseLoader):
-    """Loader for NF-ToN-IoT-v3 dataset."""
+    """Simple loader for NF-ToN-IoT-v3 dataset."""
 
     PROJECT_ROOT = Path(__file__).resolve().parents[4]
     DEFAULT_PATH = (
@@ -19,18 +20,80 @@ class ToNIoTLoader(BaseLoader):
             self._convert()
 
     def _convert(self) -> None:
-        """Convert the CSV to Parquet (runs automatically once)."""
+        """Convert CSV to Parquet (runs once)."""
         csv_path = self.data_path.with_suffix(".csv")
         if not csv_path.exists():
             raise FileNotFoundError(f"CSV not found at: {csv_path}")
-        print("[ToNIoTLoader] First run — converting CSV → Parquet...")
+        print("[ToNIoTLoader] Converting CSV → Parquet...")
         pl.scan_csv(csv_path).sink_parquet(self.data_path, compression="snappy")
         print(f"[ToNIoTLoader] Done → {self.data_path}")
 
-    def load(self, nrows: int | None = None) -> pl.LazyFrame:
-        """Load NF-ToN-IoT-v3 dataset as a LazyFrame."""
+    def load(
+        self, nrows: int | None = None, stratify: bool = False, seed: int = 42
+    ) -> pl.LazyFrame:
+        """Load dataset as LazyFrame.
+
+        Parameters
+        ----------
+        nrows : int, optional
+            If stratify=False: load first nrows (simple head).
+            If stratify=True: load stratified sample of nrows (default 1_000_000).
+        stratify : bool, default False
+            If True, preserve class distribution when sampling.
+        seed : int, default 42
+            Random seed for reproducibility.
+        """
         self.validate()
         lf = pl.scan_parquet(self.data_path)
-        if nrows is not None:
-            lf = lf.head(nrows)
-        return lf
+
+        if not stratify:
+            # Simple head (original behavior)
+            if nrows is not None:
+                lf = lf.head(nrows)
+            return lf
+
+        # Stratified sampling
+        if nrows is None:
+            nrows = 1_000_000
+
+        return self._stratified_sample(lf, nrows, seed)
+
+    def _stratified_sample(
+        self, lf: pl.LazyFrame, nrows: int, seed: int
+    ) -> pl.LazyFrame:
+        """Stratified sample preserving class distribution."""
+        total = lf.select(pl.len()).collect().item()
+        if nrows >= total:
+            return lf
+
+        frac = nrows / total
+        rng = np.random.default_rng(seed)
+
+        # Collect only label column + index (lightweight)
+        labels_df = lf.with_row_index("__row__").select(["__row__", "Attack"]).collect()
+
+        # Per-class sampling (allocate exact total)
+        selected_rows = []
+        total_allocated = 0
+        classes = labels_df["Attack"].unique().to_list()
+
+        for i, cls in enumerate(classes):
+            cls_rows = labels_df.filter(pl.col("Attack") == cls)["__row__"].to_numpy()
+
+            # Fixing the issue of rounding
+            if i == len(classes) - 1:
+                k = nrows - total_allocated
+            else:
+                k = max(1, int(round(len(cls_rows) * frac)))
+
+            k = min(k, len(cls_rows))  # don't exceed available
+            selected = rng.choice(cls_rows, size=k, replace=False)
+            selected_rows.extend(selected.tolist())
+            total_allocated += k
+
+        # Filter and return lazy
+        return (
+            lf.with_row_index("__row__")
+            .filter(pl.col("__row__").is_in(selected_rows))
+            .drop("__row__")
+        )
