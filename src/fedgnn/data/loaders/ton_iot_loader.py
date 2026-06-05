@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import polars as pl
@@ -34,6 +35,7 @@ class ToNIoTLoader(BaseLoader):
         stratify: bool = False,
         label_col: str = "Attack",
         seed: int = 42,
+        return_type: Literal["lazy", "polars", "pandas"] = "lazy",
     ) -> pl.LazyFrame:
         """Load NF-ToN-IoT-v3 dataset as a LazyFrame.
 
@@ -90,10 +92,15 @@ class ToNIoTLoader(BaseLoader):
         if nrows is None:
             nrows = 1_000_000
 
-        return self.__setattr__
+        return self._stratified_sample(lf, nrows, label_col, seed, return_type)
 
     def _stratified_sample(
-        self, lf: pl.LazyFrame, nrows: int, label_col: str, seed: int
+        self,
+        lf: pl.LazyFrame,
+        nrows: int,
+        label_col: str,
+        seed: int,
+        return_type: str,
     ) -> pl.LazyFrame:
 
         # Check label column exists
@@ -129,8 +136,85 @@ class ToNIoTLoader(BaseLoader):
             selected_rows.extend(selected.tolist())
 
         # Filter original lazy frame to only the selected rows
-        return (
+        lf_result = (
             lf.with_row_index("__row__")
             .filter(pl.col("__row__").is_in(selected_rows))
             .drop("__row__")
         )
+        return self._convert_result(lf_result, return_type)
+
+    def _convert_result(data, return_type: str):
+        """Convert result to the requested type."""
+        if return_type == "lazy":
+            return data
+        elif return_type == "polars":
+            return data.collect() if isinstance(data, pl.LazyFrame) else data
+        elif return_type == "pandas":
+            df = data.collect() if isinstance(data, pl.LazyFrame) else data
+            return df.to_pandas()
+        else:
+            raise ValueError(
+                f"return_type must be 'lazy', 'polars', or 'pandas', got {return_type}"
+            )
+
+    def save(
+        self,
+        data,
+        output_dir: str | Path = "data/sampled",
+        name: str = "ton_iot",
+        formats: list[str] | None = None,
+    ) -> dict:
+        """Save data after Sampling."""
+        if formats is None:
+            formats = ["parquet", "csv"]
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Normalize input to polars DataFrame
+        if isinstance(data, pl.LazyFrame):
+            df = data.collect()
+        elif hasattr(data, "__module__") and "pandas" in data.__module__:
+            # pd.DataFrame detected
+            df = pl.from_pandas(data)
+        elif isinstance(data, pl.DataFrame):
+            df = data
+        else:
+            raise TypeError(
+                f"data must be pl.LazyFrame, pl.DataFrame, or pd.DataFrame, "
+                f"got {type(data)}"
+            )
+
+        n_rows = df.height
+        n_cols = df.width
+        results = {}
+
+        # Save in requested formats
+        for fmt in formats:
+            if fmt == "parquet":
+                path = output_dir / f"{name}_{n_rows}.parquet"
+                df.write_parquet(path)
+                results["parquet_path"] = str(path)
+                print(f"✓ Saved {n_rows:,} rows, {n_cols:,} cols → {path}")
+
+            elif fmt == "csv":
+                path = output_dir / f"{name}_{n_rows}.csv"
+                df.write_csv(path)
+                results["csv_path"] = str(path)
+                print(f"✓ Saved {n_rows:,} rows, {n_cols:,} cols → {path}")
+
+            elif fmt == "json":
+                path = output_dir / f"{name}_{n_rows}.json"
+                df.write_json(path)
+                results["json_path"] = str(path)
+                print(f"✓ Saved {n_rows:,} rows, {n_cols:,} cols → {path}")
+
+            else:
+                raise ValueError(
+                    f"format {fmt} not supported. Choose: parquet, csv, json"
+                )
+
+        results["n_rows"] = n_rows
+        results["n_cols"] = n_cols
+
+        return results
