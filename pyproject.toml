@@ -1,9 +1,30 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "fedev-gnn"
 version = "0.1.0"
 description = "Federated Graph Neural Networks for Intrusion Detection in Connected Electric Mobility"
 readme = "README.md"
 requires-python = ">=3.10"
+dependencies = [
+    "polars>=1.0",
+    "pyarrow",
+    "numpy",
+]
+
+[project.optional-dependencies]
+eda = [
+    "pandas",
+    "matplotlib",
+    "seaborn",
+    "ipykernel",
+    "jupyterlab",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.black]
 line-length = 88
@@ -28,4 +49,6 @@ update_changelog_on_bump = true
 version_files = [
     "pyproject.toml:version"
 ]
+
+
 

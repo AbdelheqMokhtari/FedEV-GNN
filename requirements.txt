@@ -7,3 +7,12 @@ pytest
 pre-commit
 commitizen
 
+# Data science
+pandas              
+numpy
+polars
+matplotlib
+seaborn
+scipy
+ipykernel
+jupyterlab
