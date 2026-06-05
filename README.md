@@ -60,6 +60,84 @@ data/
 └── graphs/
 ```
 
+### Stratified Random Subsampling
+
+The full NF-ToN-IoT-v3 dataset contains more than **27 million flows**, which
+can be expensive to process during experimentation and rapid prototyping.
+
+To support scalable development workflows, the loader includes an optional
+**stratified random subsampling pipeline** that preserves the original attack
+class distribution while generating smaller representative subsets.
+
+By default, enabling stratified sampling without specifying `nrows`
+creates a balanced subset of:
+
+```python
+1_000_000 rows
+````
+
+This approach preserves attack distribution 
+
+
+### Example Usage
+
+```python
+from fedgnn.data.loaders.ton_iot_loader import ToNIoTLoader
+
+loader = ToNIoTLoader()
+
+# Load full dataset lazily
+lf = loader.load()
+
+# Load first 100k rows
+lf = loader.load(nrows=100_000)
+
+# Load stratified subset preserving attack distribution
+lf = loader.load(
+    stratify=True,
+    nrows=1_000_000,
+)
+```
+
+### Sample Persistence
+
+Generated subsets can be saved locally for reuse during experiments.
+
+Instead of recomputing the stratified sample every time, sampled datasets are
+stored under:
+
+```text
+data/samples/
+```
+
+Example structure:
+
+```text
+data/
+├── raw/
+├── processed/
+├── samples/
+│   └── NF-ToN-IoT-v3/
+│       └── stratified_1M.parquet
+└── graphs/
+```
+
+### Lazy Loading Architecture
+
+The dataset loader is built using **Polars LazyFrame** execution.
+
+This enables:
+
+* memory-efficient processing,
+* deferred execution,
+* scalable filtering,
+* efficient column projection,
+* large-scale dataset handling.
+
+Unlike traditional eager pandas loading, LazyFrames avoid loading the entire
+dataset into RAM immediately, making the framework more suitable for large
+intrusion detection datasets.
+
 ## Setup
 
 ## Project Structure
