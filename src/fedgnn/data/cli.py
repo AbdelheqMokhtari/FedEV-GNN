@@ -2,10 +2,11 @@
 
 A single entrypoint with subcommands so each stage can be run consistently::
 
-    python -m fedgnn.data load [--sample | --processed] [--rows N]
+    python -m fedgnn.data load [--sample | --processed | --split 0]
     python -m fedgnn.data sample --rows 1000000    # raw -> data/samples/
     python -m fedgnn.data clean                    # sample -> data/processed/
     python -m fedgnn.data select                   # validate & write 26-feature set
+    python -m fedgnn.data split [--csv]            # hub partitioning -> data/clients/
 
 (also available as the ``fedgnn-data`` console script).
 """
@@ -13,9 +14,11 @@ A single entrypoint with subcommands so each stage can be run consistently::
 import argparse
 import json
 import textwrap
+from pathlib import Path
 
 import polars as pl
 
+from fedgnn.data.federated_split import hub_splitter
 from fedgnn.data.loaders import ToNIoTLoader
 from fedgnn.data.preprocessing import cleaning, feature_selection
 from fedgnn.data.preprocessing.cleaning import REFERENCE_COLS, TIME_COLS, TOPOLOGY_COLS
@@ -97,8 +100,8 @@ def _print_features(df_cols: list[str], processed: bool) -> None:
                 print(f"{_I}{idx}  {name:<{col_w}}", end=end)
 
         print(
-            f"\n\n  {len(df_cols)} total cols | {len(all_features)}"
-            "features | {len(selected_set)} selected"
+            f"\n\n  {len(df_cols)} total cols | {len(all_features)} features"
+            f" | {len(selected_set)} selected"
         )
     else:
         feature_cols = [c for c in df_cols if c not in fixed_set | set(LABEL_COLS)]
@@ -107,17 +110,74 @@ def _print_features(df_cols: list[str], processed: bool) -> None:
         print(f"\n  {len(df_cols)} total cols | {len(feature_cols)} features")
 
 
-def _cmd_load(args: argparse.Namespace) -> None:
-    """Inspect raw data, a sample, or the processed dataset."""
-    if args.split is not None:
-        splits_dir = ToNIoTLoader.PROJECT_ROOT / "data" / "splits"
-        if not splits_dir.exists():
+CLIENTS_DIR = ToNIoTLoader.PROJECT_ROOT / "data" / "clients"
+
+
+def _resolve_client(token: str) -> Path:
+    """Accept '0', '00', 'client_00', etc. and return the client folder path."""
+    # Normalise to 'client_NN'
+    if token.startswith("client_"):
+        name = token
+    else:
+        try:
+            name = f"client_{int(token):02d}"
+        except ValueError:
             raise SystemExit(
-                "[load] federated splits not yet created — run `fedgnn-data split`"
+                f"[load] unrecognised client id '{token}' — use 0-9 or client_00"
             )
-        raise SystemExit(
-            "[load] --split not yet implemented " "(coming with the federated stage)"
+    path = CLIENTS_DIR / name
+    if not path.exists():
+        available = (
+            sorted(p.name for p in CLIENTS_DIR.glob("client_*"))
+            if CLIENTS_DIR.exists()
+            else []
         )
+        hint = (
+            f"  Available: {', '.join(available)}"
+            if available
+            else "  Run `fedgnn-data split` first."
+        )
+        raise SystemExit(f"[load] client folder not found: {path.name}\n{hint}")
+    return path
+
+
+def _print_client(client_dir: Path, head: int) -> None:
+    """Print meta, preview, attack distribution, and feature catalogue for a client."""
+    meta_path = client_dir / "meta.json"
+    meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+
+    df = pl.read_parquet(client_dir / "flows.parquet")
+
+    print(
+        f"[load] source    :"
+        f"{client_dir.relative_to(ToNIoTLoader.PROJECT_ROOT)}/flows.parquet"
+    )
+    print(f"[load] hub IP    : {meta.get('hub_ip', 'unknown')}")
+    print(f"[load] shape     : {df.height:,} rows × {df.width} cols")
+
+    hub_stats = meta.get("hub_stats", {})
+    if hub_stats:
+        print(
+            f"[load] hub stats : score={hub_stats.get('score', '?'):,}  "
+            f"src_flows={hub_stats.get('src_flows', '?'):,}  "
+            f"dst_flows={hub_stats.get('dst_flows', '?'):,}"
+        )
+    print()
+    print(df.head(head))
+
+    if "Attack" in df.columns:
+        print()
+        print(df.group_by("Attack").len().sort("len", descending=True))
+
+    _print_features(df.columns, processed=True)
+
+
+def _cmd_load(args: argparse.Namespace) -> None:
+    """Inspect raw data, a sample, a processed dataset, or a federated client."""
+    if args.split is not None:
+        client_dir = _resolve_client(args.split)
+        _print_client(client_dir, args.head)
+        return
 
     if args.processed:
         # Pick cleaned_<rows>.parquet or the newest available.
@@ -193,6 +253,10 @@ def _cmd_select(_args: argparse.Namespace) -> None:
     feature_selection.run()
 
 
+def _cmd_split(args: argparse.Namespace) -> None:
+    hub_splitter.run(n_clients=args.n_clients, csv=args.csv)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="fedgnn-data", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -207,7 +271,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--split",
         type=str,
         metavar="CLIENT",
-        help="load a federated split by client id (coming soon)",
+        help="load a federated client (e.g. 0, client_00) from data/clients/",
     )
     p_load.add_argument(
         "--rows",
@@ -241,6 +305,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_select = sub.add_parser("select", help="write the fixed 26-feature set to JSON")
     p_select.set_defaults(func=_cmd_select)
+
+    p_split = sub.add_parser(
+        "split", help="hub-centered graph partitioning → data/clients/"
+    )
+    p_split.add_argument(
+        "--n-clients",
+        type=int,
+        default=10,
+        help="number of federated clients / hubs (default 10)",
+    )
+    p_split.add_argument(
+        "--csv",
+        action="store_true",
+        help="also write flows.csv alongside flows.parquet in each client folder",
+    )
+    p_split.set_defaults(func=_cmd_split)
 
     return parser
 
