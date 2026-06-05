@@ -13,11 +13,33 @@ class ToNIoTLoader(BaseLoader):
     DEFAULT_PATH = (
         PROJECT_ROOT / "data" / "raw" / "NF-ToN-IoT-v3" / "NF-ToN-IoT-v3.parquet"
     )
+    SAMPLES_DIR = PROJECT_ROOT / "data" / "samples"
 
-    def __init__(self, data_path: str | Path | None = None):
-        super().__init__(data_path or self.DEFAULT_PATH)
-        if not self.data_path.exists():
+    def __init__(self, data_path: str | Path | None = None, sample: bool = False):
+        """Create a loader.
+
+        Parameters
+        ----------
+        data_path : str | Path, optional
+            Explicit path to load. Overrides ``sample`` when given.
+        sample : bool, default False
+            If True, load the prepared parquet from ``data/samples/`` instead of
+            the full raw dataset (no 5.3GB CSV conversion is triggered).
+        """
+        if data_path is None:
+            data_path = self._latest_sample() if sample else self.DEFAULT_PATH
+        super().__init__(data_path)
+        self.sample = sample
+        # Only the raw dataset needs the one-off CSV -> Parquet conversion.
+        if not sample and not self.data_path.exists():
             self._convert()
+
+    def _latest_sample(self) -> Path:
+        """Return the most recent sample parquet (pattern: ton_iot_{n}.parquet)."""
+        matches = sorted(self.SAMPLES_DIR.glob("ton_iot_*.parquet"))
+        if not matches:
+            raise FileNotFoundError(f"No sample parquet found in {self.SAMPLES_DIR}")
+        return max(matches, key=lambda p: p.stat().st_mtime)
 
     def _convert(self) -> None:
         """Convert CSV to Parquet (runs once)."""
