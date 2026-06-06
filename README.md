@@ -61,6 +61,9 @@ fedgnn-data select
 
 # 4. Partition into 10 federated client folders
 fedgnn-data split
+
+# 5. Build PyG graphs (static + temporal) for T-GAT training
+fedgnn-data build
 ```
 
 ---
@@ -156,6 +159,46 @@ src/dst count, and per-class distribution.
 
 ---
 
+### `build` — PyG graph construction for T-GAT
+
+```bash
+fedgnn-data build                       # all clients, 1-hour snapshot windows
+fedgnn-data build --window-ms 1800000   # 30-minute windows
+fedgnn-data build --n-clients 2         # only the first 2 clients (debug)
+```
+
+> Requires the `gnn` extra: `pip install -e ".[gnn]"` (`torch`,
+> `torch-geometric`, `scipy`). Every other `fedgnn-data` command works
+> without it; `build` exits with an install hint if it's missing.
+
+Turns each client's `flows.parquet` into the PyG graphs T-GAT trains on.
+**Nodes = unique device IPs, edges = flows** — a normal communication graph;
+the only "temporal" twist is that flows are bucketed by
+`FLOW_START_MILLISECONDS` into fixed-width windows and **one graph snapshot
+is built per window**, because T-GAT needs that ordered sequence to learn how
+the graph evolves, not just a single frozen view.
+
+Each snapshot is a `torch_geometric.data.Data` with `x` (the 26 selected
+features, mean-aggregated over each node's incident in+out flows), `edge_index`,
+`edge_attr` (the same 26 raw features kept per-edge), and `y` (`y_multiclass`).
+
+Writes, alongside each client's `flows.parquet`:
+
+| File | Contents |
+|---|---|
+| `graph.pt` | one whole-client static `Data` graph — training-ready single graph |
+| `graphs.pt` | ordered `list[Data]` snapshot sequence — what T-GAT unrolls over |
+| `graph.mat` | the same static graph as `graph.pt`, mirrored to `.mat` for MATLAB/Octave/scipy inspection |
+| `graph_meta.json` | `graph` block (static-graph nodes/edges/class distribution, the one you'll likely read first) + `temporal` block (sequence stats) |
+
+It also prints — and writes to the global `data/processed/tgat_param_count.json`
+(shared by every client, since the architecture doesn't vary per client) — the
+theoretical parameter count of the local T-GAT model with a per-layer
+breakdown: `GAT(26→64, heads=2)` → `GAT(128→32, heads=1)` →
+`Linear(32→num_classes)`.
+
+---
+
 ## Output Layout
 
 ```
@@ -168,11 +211,16 @@ data/
 │   ├── cleaned_1000000.parquet     ← fedgnn-data clean
 │   ├── feature_columns.json        ← all 48 edge features
 │   ├── label_map.json              ← class → index (shared)
-│   └── selected_features.json      ← fixed 26-feature subset
+│   ├── selected_features.json      ← fixed 26-feature subset
+│   └── tgat_param_count.json       ← fedgnn-data build (global, shared by all clients)
 └── clients/
-    ├── client_00/                  ← fedgnn-data split
+    ├── client_00/                  ← fedgnn-data split (+ build)
     │   ├── flows.parquet
-    │   └── meta.json
+    │   ├── meta.json
+    │   ├── graph.pt                ← fedgnn-data build (whole-client static graph)
+    │   ├── graphs.pt               ← fedgnn-data build (temporal snapshot sequence)
+    │   ├── graph.mat               ← fedgnn-data build (same static graph, .mat)
+    │   └── graph_meta.json         ← fedgnn-data build
     ├── ...
     └── manifest.json
 ```
@@ -198,6 +246,15 @@ df = lf.collect()
 from fedgnn.data.preprocessing.cleaning import clean
 from fedgnn.data.preprocessing.feature_selection import SELECTED, GROUPS
 from fedgnn.data.federated_split.hub_splitter import compute_hub_scores, partition
+```
+
+```python
+# Requires the `gnn` extra (torch, torch-geometric, scipy)
+from fedgnn.data.graph_builder import build_snapshot, build_snapshot_sequence
+
+import torch
+graph = torch.load("data/clients/client_00/graph.pt", weights_only=False)
+sequence = torch.load("data/clients/client_00/graphs.pt", weights_only=False)
 ```
 
 ---
