@@ -2,11 +2,12 @@
 
 A single entrypoint with subcommands so each stage can be run consistently::
 
-    python -m fedgnn.data load [--sample | --processed | --split 0]
-    python -m fedgnn.data sample --rows 1000000    # raw -> data/samples/
-    python -m fedgnn.data clean                    # sample -> data/processed/
-    python -m fedgnn.data select                   # validate & write 26-feature set
-    python -m fedgnn.data split [--csv]            # hub partitioning -> data/clients/
+    fedgnn-data load [--sample | --processed | --split 0]
+    fedgnn-data sample --rows 1000000    # raw -> data/samples/
+    fedgnn-data clean                    # sample -> data/processed/
+    fedgnn-data select                   # validate & write 26-feature set
+    fedgnn-data split [--csv]            # hub partitioning -> data/clients/
+    fedgnn-data build [--window-ms N]    # PyG graphs -> data/clients/*/graph*.pt
 
 (also available as the ``fedgnn-data`` console script).
 """
@@ -18,6 +19,7 @@ from pathlib import Path
 
 import polars as pl
 
+from fedgnn.data import graph_builder
 from fedgnn.data.federated_split import hub_splitter
 from fedgnn.data.loaders import ToNIoTLoader
 from fedgnn.data.preprocessing import cleaning, feature_selection
@@ -257,6 +259,10 @@ def _cmd_split(args: argparse.Namespace) -> None:
     hub_splitter.run(n_clients=args.n_clients, csv=args.csv)
 
 
+def _cmd_build(args: argparse.Namespace) -> None:
+    graph_builder.run(window_ms=args.window_ms, n_clients=args.n_clients)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="fedgnn-data", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -321,6 +327,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="also write flows.csv alongside flows.parquet in each client folder",
     )
     p_split.set_defaults(func=_cmd_split)
+
+    p_build = sub.add_parser(
+        "build",
+        help="build PyG static + temporal graphs for T-GAT → data/clients/*/graph*.pt",
+    )
+    p_build.add_argument(
+        "--window-ms",
+        type=int,
+        default=3_600_000,
+        help="temporal snapshot window width in milliseconds (default 1 hour)",
+    )
+    p_build.add_argument(
+        "--n-clients",
+        type=int,
+        default=None,
+        help="build only the first N client folders (default: all)",
+    )
+    p_build.set_defaults(func=_cmd_build)
 
     return parser
 

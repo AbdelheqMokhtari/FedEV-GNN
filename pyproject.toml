@@ -25,6 +25,11 @@ eda = [
     "ipykernel",
     "jupyterlab",
 ]
+gnn = [
+    "torch",
+    "torch-geometric",
+    "scipy",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
