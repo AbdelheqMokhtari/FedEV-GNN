@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 fedgnn-data = "fedgnn.data.cli:main"
+fedgnn-train = "fedgnn.train.cli:main"
 
 [project.optional-dependencies]
 eda = [
@@ -29,6 +30,7 @@ gnn = [
     "torch",
     "torch-geometric",
     "scipy",
+    "networkx>=3.0",
 ]
 
 [tool.setuptools.packages.find]
