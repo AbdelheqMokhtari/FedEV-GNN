@@ -199,6 +199,45 @@ breakdown: `GAT(26→64, heads=2)` → `GAT(128→32, heads=1)` →
 
 ---
 
+## Validation CLI — `fedgnn-validate`
+
+Turns the JSON a training run leaves under `Results/<exp>/` into evaluation
+**figures** under `Figures/<exp>/` — loss curves per client, bar charts of how
+good each client and the global (server) model are, and the global-metric /
+aggregation-weight evolution. Read-only: it re-draws what training recorded, never
+re-runs a model, so it works on a finished *or* interrupted run.
+
+```bash
+pip install -e ".[viz]"        # matplotlib
+
+fedgnn-validate list                       # show available experiments
+fedgnn-validate plot                       # latest experiment -> Figures/<latest>/
+fedgnn-validate plot fedgnn05              # a specific experiment
+fedgnn-validate plot --all                 # every experiment under Results/
+fedgnn-validate plot fedgnn02 --format pdf --dpi 200 --verbose
+```
+
+Output per experiment `<exp>`:
+
+```
+Figures/<exp>/
+├── loss_all_clients.png               every client's training loss, overlaid
+├── client_quality.png                 grouped bars — how good each client is
+├── clients/
+│   ├── client_NN_loss.png             one client's loss curve
+│   └── client_NN_metrics.png          its local-vs-global metric trends
+└── server/
+    ├── global_metrics_evolution.png   the four headline metrics per round
+    ├── server_quality.png             bars — how good the global model is
+    └── aggregation_weights.png        each client's FedAvg weight share per round
+```
+
+Quality bars use the held-out **test** metrics when present, and fall back to the
+last-round **global** metrics for an interrupted run (noted in the title). See
+[docs/validation-pipeline.md](docs/validation-pipeline.md) for the full reference.
+
+---
+
 ## Output Layout
 
 ```
@@ -269,7 +308,12 @@ src/fedgnn/
 │   ├── graph_builder/      edge_graph.py · temporal_graph.py
 │   ├── federated_split/    hub_splitter.py
 │   └── cli.py              fedgnn-data entry point
-└── ...
+├── train/                 federated FedAvg simulation (fedgnn-train)
+├── evaluation/            metrics · evaluator · FLOPs accounting
+└── validation/            results → figures (fedgnn-validate)
+    ├── loader.py          re-assembles Results/<exp>/ into ExperimentResults
+    ├── plots.py           loss curves · quality bars · server dynamics
+    └── cli.py             fedgnn-validate entry point
 ```
 
 ---
@@ -281,4 +325,7 @@ pip install -e ".[dev]"
 pytest tests/
 ```
 
-Full pipeline documentation: [docs/data_pipeline.md](docs/data_pipeline.md)
+Pipeline documentation:
+[docs/data_pipeline.md](docs/data_pipeline.md) ·
+[docs/train-pipeline.md](docs/train-pipeline.md) ·
+[docs/validation-pipeline.md](docs/validation-pipeline.md)

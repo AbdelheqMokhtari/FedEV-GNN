@@ -32,3 +32,6 @@ Models/
 Results/
 results/
 checkpoints/
+
+# Validation artifacts (rendered figures)
+Figures/
