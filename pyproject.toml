@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fedev-gnn"
-version = "0.1.0"
+version = "0.2.0"
 description = "Federated Graph Neural Networks for Intrusion Detection in Connected Electric Mobility"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -49,7 +49,7 @@ testpaths = ["tests"]
 
 [tool.commitizen]
 name = "cz_conventional_commits"
-version = "0.1.0"
+version = "0.2.0"
 tag_format = "v$version"
 update_changelog_on_bump = true
 version_files = [
