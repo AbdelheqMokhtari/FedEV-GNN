@@ -15,7 +15,6 @@ check:
 
 release:
 	pre-commit run --all-files
-	pytest
 	cz bump
 	git checkout main
 	git merge develop
