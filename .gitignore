@@ -26,3 +26,9 @@ data/clients
 
 # Documentary
 docs/
+
+# Training artifacts (global + per-client models and results)
+Models/
+Results/
+results/
+checkpoints/
