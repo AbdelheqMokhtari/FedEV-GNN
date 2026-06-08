@@ -30,8 +30,13 @@ from pathlib import Path
 
 import torch
 
-from fedgnn.evaluation import SELECTABLE_METRICS
-from fedgnn.train.client import CLIENTS_DIR, PROCESSED_DIR, FederatedClient
+from fedgnn.evaluation import SELECTABLE_METRICS, report_from_predictions
+from fedgnn.train.client import (
+    CLASS_WEIGHT_SCHEMES,
+    CLIENTS_DIR,
+    PROCESSED_DIR,
+    FederatedClient,
+)
 from fedgnn.train.experiment import Experiment
 from fedgnn.train.server import CheckpointManager, FederatedServer
 
@@ -97,22 +102,39 @@ def _final_test_evaluation(
         "attack_detection_recall",
         "accuracy",
     )
+    num_classes = clients[0].num_classes if clients else 0
+    benign_class = clients[0].benign_class if clients else 0
+    pooled_preds, pooled_targets = [], []
     for client in clients:
         client.set_weights(state)
         rep = client.evaluate_test()
-        per_client[client.name] = {m: round(rep[m], 4) for m in headline}
+        entry = {m: round(rep[m], 4) for m in headline}
+        # row=true, col=pred counts — lets validation draw per-client / binary CMs
+        entry["confusion_matrix"] = rep["confusion_matrix"]
+        per_client[client.name] = entry
+        pooled_preds.append(client.test_preds)
+        pooled_targets.append(client.test_targets)
         # persist the test block into the client's own results.json
         client.save_results(experiment.results_dir, client_records[client.client_id])
 
-    aggregate = {
-        m: round(_mean([client.test_report[m] for client in clients]), 4)
-        for m in headline
-    }
+    # Pool every client's test predictions into one honest multi-class report — the
+    # aggregate and its confusion matrix span all classes, not a mean of degenerate
+    # per-client (often single-class) macro metrics.
+    pooled = report_from_predictions(
+        torch.cat(pooled_preds),
+        torch.cat(pooled_targets),
+        num_classes,
+        metric,
+        benign_class,
+    )
+    aggregate = {m: round(pooled[m], 4) for m in headline}
+    agg_cm = pooled["confusion_matrix"]
     test_doc = {
         "experiment": experiment.name,
         "evaluated_model": source.name,
         "selection_metric": metric,
         "aggregate": aggregate,
+        "confusion_matrix": agg_cm,
         "per_client": per_client,
     }
     (experiment.results_dir / "test_results.json").write_text(
@@ -146,6 +168,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
             "step": args.overlay_step,
         },
         "metric": args.metric,
+        "class_weight": args.class_weight,
         "architecture": {
             "hidden_per_head": args.hidden,
             "heads": args.heads,
@@ -186,6 +209,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
             embed_dim=args.embed_dim,
             louvain_resolution=args.louvain_resolution,
             metric=args.metric,
+            class_weight=args.class_weight,
             benign_class=benign_class,
             seed=args.seed,
         )
@@ -278,18 +302,33 @@ def _cmd_run(args: argparse.Namespace) -> None:
                     "flops_per_epoch": train_info["flops_per_epoch"],
                     "flops_this_round": train_info["flops_this_round"],
                     "cumulative_flops": train_info["cumulative_flops"],
+                    # measured computational resources of the local training
+                    "train_time_s": train_info["train_time_s"],
+                    "train_cpu_percent": train_info["train_cpu_percent"],
+                    "train_rss_mb": train_info["train_rss_mb"],
+                    **(
+                        {"train_gpu_peak_mb": train_info["train_gpu_peak_mb"]}
+                        if "train_gpu_peak_mb" in train_info
+                        else {}
+                    ),
                 }
 
             # 2. server: overlay graph + Adaptive Weighted FedAvg
             global_state, info = server.aggregate(payloads)
 
-            # 3. evaluate the *aggregated* global model on every client's val split
-            global_reports = []
+            # 3. evaluate the *aggregated* global model on every client's val split.
+            #    Per-client reports are kept for diagnostics, but the headline metric
+            #    is computed by POOLING every client's edge predictions into one
+            #    multi-class report — under the non-IID split a per-client macro
+            #    metric is degenerate (a benign-only client scores a trivial 1.0),
+            #    so their plain average is misleading; the pooled score is honest.
+            pooled_preds, pooled_targets = [], []
             for client in clients:
                 client.set_weights(global_state)
                 client.evaluate()
                 rep = client.last_report
-                global_reports.append(rep)
+                pooled_preds.append(client.last_preds)
+                pooled_targets.append(client.last_targets)
                 rec = round_records[client.client_id]
                 rec["global_score"] = round(rep["score"], 4)
                 rec["global_macro_f1"] = round(rep["macro_f1"], 4)
@@ -301,12 +340,32 @@ def _cmd_run(args: argparse.Namespace) -> None:
                 rec["aggregation_weight"] = round(
                     info.weights[info.client_ids.index(client.client_id)], 4
                 )
+                # measured inference cost of the global-model evaluation
+                if client.last_eval_usage is not None:
+                    rec.update(client.last_eval_usage.as_record(prefix="inference_"))
 
-            global_means = {
-                m: _mean([rep[m] for rep in global_reports]) for m in REPORTED_METRICS
-            }
-            avg_metric = _mean([rep["score"] for rep in global_reports])
+            pooled_report = report_from_predictions(
+                torch.cat(pooled_preds),
+                torch.cat(pooled_targets),
+                num_classes,
+                args.metric,
+                benign_class,
+            )
+            global_means = {m: pooled_report[m] for m in REPORTED_METRICS}
+            avg_metric = pooled_report["score"]
             round_flops = sum(rec["flops_this_round"] for rec in round_records.values())
+            # measured resource roll-up for the round (across clients)
+            recs_now = list(round_records.values())
+            round_train_time = sum(rec["train_time_s"] for rec in recs_now)
+            round_infer_time = sum(rec.get("inference_time_s", 0.0) for rec in recs_now)
+            round_peak_mem = max(
+                (
+                    rec.get("train_gpu_peak_mb", rec.get("train_rss_mb", 0.0))
+                    for rec in recs_now
+                ),
+                default=0.0,
+            )
+            round_avg_cpu = _mean([rec["train_cpu_percent"] for rec in recs_now])
 
             # 4. persist client artifacts (model already saved; append + write results)
             for client in clients:
@@ -339,6 +398,12 @@ def _cmd_run(args: argparse.Namespace) -> None:
                     "global_metrics": {k: round(v, 4) for k, v in global_means.items()},
                     "best_metric": round(best_metric, 4),
                     "round_flops": round_flops,
+                    "resources": {
+                        "train_time_s": round(round_train_time, 3),
+                        "inference_time_s": round(round_infer_time, 3),
+                        "avg_cpu_percent": round(round_avg_cpu, 1),
+                        "peak_mem_mb": round(round_peak_mem, 1),
+                    },
                 }
             )
             ckpt.save_state(
@@ -376,6 +441,12 @@ def _cmd_run(args: argparse.Namespace) -> None:
                 f"{info.overlay_edges} edges @ thr={info.overlay_threshold:.2f} | "
                 f"{info.overlay_isolated} isolated"
             )
+            mem_unit = "GPU" if device.type == "cuda" else "RSS"
+            print(
+                f"    resources: train={round_train_time:.2f}s "
+                f"infer={round_infer_time:.2f}s | "
+                f"cpu~{round_avg_cpu:.0f}% | peak {mem_unit}={round_peak_mem:.0f}MB"
+            )
             if not args.quiet:
                 for client in clients:
                     rec = round_records[client.client_id]
@@ -404,11 +475,29 @@ def _cmd_run(args: argparse.Namespace) -> None:
     test_metrics = _final_test_evaluation(
         clients, ckpt, experiment, client_records, args.metric
     )
+    # Roll up the measured resource cost across all rounds for the run record.
+    round_res = [h.get("resources", {}) for h in history]
+    resource_summary = {
+        "total_train_time_s": round(
+            sum(x.get("train_time_s", 0.0) for x in round_res), 2
+        ),
+        "total_inference_time_s": round(
+            sum(x.get("inference_time_s", 0.0) for x in round_res), 2
+        ),
+        "avg_cpu_percent": round(
+            _mean([x.get("avg_cpu_percent", 0.0) for x in round_res]), 1
+        ),
+        "peak_mem_mb": round(
+            max((x.get("peak_mem_mb", 0.0) for x in round_res), default=0.0), 1
+        ),
+        "mem_kind": "gpu" if device.type == "cuda" else "rss",
+    }
     experiment.update_metadata(
         status="completed",
         rounds_completed=args.rounds,
         elapsed_seconds=round(time.time() - run_start, 1),
         test_metrics=test_metrics,
+        resources=resource_summary,
     )
     print(
         f"[train] done — experiment '{experiment.name}' | "
@@ -482,9 +571,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_run.add_argument(
         "--split",
-        choices=["temporal", "random"],
-        default="temporal",
-        help="edge split: temporal (past->future, default) or random",
+        choices=["stratified", "stratified_temporal", "temporal", "random"],
+        default="stratified",
+        help="edge split: stratified (per-class balanced, default — every class in "
+        "train/val/test), stratified_temporal (per-class past->future), temporal "
+        "(global past->future), or random",
     )
     # --- local GAT architecture ---
     p_run.add_argument(
@@ -533,7 +624,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--metric",
         choices=list(SELECTABLE_METRICS),
         default="balanced_accuracy",
-        help="metric driving best-model selection (all metrics are still logged)",
+        help="metric driving best-model selection AND the Adaptive-FedAvg "
+        "aggregation weights (default balanced_accuracy — mean per-class recall, "
+        "not fooled by class imbalance). Use macro_attack_recall to optimise "
+        "purely for catching attack types. All metrics are logged regardless.",
+    )
+    p_run.add_argument(
+        "--class-weight",
+        dest="class_weight",
+        choices=list(CLASS_WEIGHT_SCHEMES),
+        default="sqrt_inverse",
+        help="per-class loss weighting: sqrt_inverse (default, softened — corrects "
+        "imbalance without over-predicting rare attacks), inverse (aggressive, more "
+        "false positives), or none (uniform)",
     )
     p_run.add_argument(
         "--n_clients", type=int, default=None, help="use only the first N clients"
