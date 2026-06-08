@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fedev-gnn"
-version = "0.1.0"
+version = "0.2.0"
 description = "Federated Graph Neural Networks for Intrusion Detection in Connected Electric Mobility"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -17,6 +17,8 @@ dependencies = [
 [project.scripts]
 fedgnn-data = "fedgnn.data.cli:main"
 fedgnn-train = "fedgnn.train.cli:main"
+fedgnn-validate = "fedgnn.validation.cli:main"
+fedgnn-monitor = "fedgnn.monitor.cli:main"
 
 [project.optional-dependencies]
 eda = [
@@ -31,6 +33,9 @@ gnn = [
     "torch-geometric",
     "scipy",
     "networkx>=3.0",
+]
+viz = [
+    "matplotlib>=3.7",
 ]
 
 [tool.setuptools.packages.find]
@@ -49,7 +54,7 @@ testpaths = ["tests"]
 
 [tool.commitizen]
 name = "cz_conventional_commits"
-version = "0.1.0"
+version = "0.2.0"
 tag_format = "v$version"
 update_changelog_on_bump = true
 version_files = [

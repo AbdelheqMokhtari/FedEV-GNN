@@ -4,6 +4,7 @@ from pathlib import Path
 import polars as pl
 
 from fedgnn.data.loaders import ToNIoTLoader
+from fedgnn.data.preprocessing.engineering import engineer_features
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
@@ -91,6 +92,11 @@ def clean(df: pl.DataFrame) -> tuple[pl.DataFrame, list[str], dict[str, int], di
     df = normalize_labels(df)
     df = fill_missing(df)
 
+    # Engineer model-ready features (one-hot protocol/ports, decomposed TCP-flag
+    # bits, ratios, size fractions, ranges) from the now-clean raw counters. Raw
+    # source columns are kept; selection downstream curates which to actually use.
+    df, engineered = engineer_features(df)
+
     # Features = everything that is not topology, time, a reference id, or a label.
     # (L4_DST_PORT is intentionally NOT reserved, so it stays an edge feature.)
     reserved = set(TOPOLOGY_COLS + TIME_COLS + REFERENCE_COLS + RAW_LABEL_COLS)
@@ -114,6 +120,7 @@ def clean(df: pl.DataFrame) -> tuple[pl.DataFrame, list[str], dict[str, int], di
         "rows_after": df.height,
         "dropped_constant": dropped_constant,
         "n_features": len(feature_cols),
+        "n_engineered": len([c for c in engineered if c in feature_cols]),
     }
     return df, feature_cols, label_map, report
 
@@ -156,5 +163,8 @@ def run(sample_rows: int | None = None) -> None:
         f"(dropped {dropped:,})"
     )
     print(f"[clean] constant cols dropped: {report['dropped_constant'] or 'none'}")
-    print(f"[clean] features kept: {report['n_features']} | classes: {len(label_map)}")
+    print(
+        f"[clean] features kept: {report['n_features']} "
+        f"({report['n_engineered']} engineered) | classes: {len(label_map)}"
+    )
     print(f"[clean] wrote {out_parquet.relative_to(PROJECT_ROOT)}")

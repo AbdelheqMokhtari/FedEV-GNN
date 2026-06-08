@@ -300,7 +300,10 @@ class FederatedServer:
         2. Run the server GraphSAGE over it (global structural context; logged).
         3. Adaptive Weighted FedAvg of the client state-dicts using ``w_k``.
         """
-        scores = [p.val_score for p in payloads]
+        # Weight by attack-detection skill (agg_score), not the raw val metric: a
+        # benign-only client maxes balanced accuracy but has agg_score 0, so it can
+        # no longer dominate FedAvg and drag the global model to "always benign".
+        scores = [p.agg_score for p in payloads]
         communities_per_client = [p.community_embeddings.shape[0] for p in payloads]
         embeddings = torch.cat([p.community_embeddings for p in payloads], dim=0).to(
             self.device

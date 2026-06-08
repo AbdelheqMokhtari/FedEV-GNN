@@ -14,6 +14,7 @@ from fedgnn.evaluation.metrics import (
     accuracy,
     attack_detection_recall,
     balanced_accuracy,
+    confusion_matrix,
     macro_attack_recall,
     macro_f1,
     per_class_report,
@@ -30,28 +31,35 @@ SELECTABLE_METRICS = (
 
 
 @torch.no_grad()
-def evaluate_model(
-    model: nn.Module,
-    graph: Data,
-    mask: torch.Tensor,
+def predict_model(
+    model: nn.Module, graph: Data, mask: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Forward pass -> ``(preds, targets)`` for the masked edges (raw class ids).
+
+    Separated from scoring so the caller can **pool** predictions from several
+    graphs (e.g. all federated clients) into one set before computing a single,
+    honest multi-class report — see :func:`report_from_predictions`.
+    """
+    model.eval()
+    logits, _ = model(graph.x, graph.edge_index)
+    return logits[mask].argmax(dim=1), graph.y[mask]
+
+
+def report_from_predictions(
+    preds: torch.Tensor,
+    targets: torch.Tensor,
     num_classes: int,
     metric: str = "balanced_accuracy",
     benign_class: int = 0,
 ) -> dict:
-    """Score ``model`` on the masked edges of ``graph``.
+    """Build the full metric report from already-computed predictions/targets.
 
-    Returns a report with accuracy, macro-F1, balanced accuracy (macro recall),
-    the two attack-recall views, a ``per_class`` precision/recall/f1/support
-    breakdown, the evaluated-edge count, and a ``score`` alias for the selected
-    ``metric`` (the scalar used for weighting / best-model tracking).
+    Returns accuracy, macro-F1, balanced accuracy (macro recall), the two
+    attack-recall views, a ``per_class`` breakdown, the confusion matrix, the
+    evaluated-edge count, and a ``score`` alias for the selected ``metric``.
     """
     if metric not in SELECTABLE_METRICS:
         raise ValueError(f"metric must be one of {SELECTABLE_METRICS}, got {metric!r}")
-
-    model.eval()
-    logits, _ = model(graph.x, graph.edge_index)
-    preds = logits[mask].argmax(dim=1)
-    targets = graph.y[mask]
 
     report = {
         "accuracy": accuracy(preds, targets),
@@ -64,7 +72,22 @@ def evaluate_model(
             preds, targets, benign_class
         ),
         "per_class": per_class_report(preds, targets, num_classes),
-        "n_eval_edges": int(mask.sum()),
+        "confusion_matrix": confusion_matrix(preds, targets, num_classes),
+        "n_eval_edges": int(preds.numel()),
     }
     report["score"] = report[metric]
     return report
+
+
+@torch.no_grad()
+def evaluate_model(
+    model: nn.Module,
+    graph: Data,
+    mask: torch.Tensor,
+    num_classes: int,
+    metric: str = "balanced_accuracy",
+    benign_class: int = 0,
+) -> dict:
+    """Score ``model`` on the masked edges of ``graph`` (predict + report)."""
+    preds, targets = predict_model(model, graph, mask)
+    return report_from_predictions(preds, targets, num_classes, metric, benign_class)

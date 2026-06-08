@@ -165,69 +165,82 @@ def build_metadata(
     }
 
 
-# Theoretical T-GAT parameter count
+# Local GAT parameter count
+#
+# Estimate of the model actually trained — the multi-head, residual GAT encoder +
+# edge-MLP classifier in `fedgnn.train.client.LocalGAT`. Defaults below mirror the
+# `fedgnn-train run` defaults; the breakdown (convs / norms / classifier) matches
+# what `fedgnn-monitor` reports from the live model.
 
 
 def gat_layer_params(
-    in_channels: int, out_channels: int, heads: int, concat: bool = True
+    in_channels: int, out_per_head: int, heads: int, concat: bool = True
 ) -> int:
-
-    lin = in_channels * heads * out_channels
-    attention = 2 * heads * out_channels
-    bias = heads * out_channels if concat else out_channels
+    """Parameters of one `GATConv` layer (linear projection + attention + bias)."""
+    lin = in_channels * heads * out_per_head
+    attention = 2 * heads * out_per_head
+    bias = heads * out_per_head if concat else out_per_head
     return lin + attention + bias
 
 
-def report_parameter_count(in_channels: int, num_classes: int) -> dict[str, int]:
+def report_parameter_count(
+    in_channels: int,
+    num_classes: int,
+    hidden_per_head: int = 64,
+    heads: int = 4,
+    num_layers: int = 3,
+    embed_dim: int = 32,
+) -> dict:
+    """Parameter count of the default `LocalGAT` (a normal, non-temporal GAT)."""
+    hidden = hidden_per_head * heads
 
-    l1_per_head, l1_heads = 64, 2
-    l2_per_head, l2_heads = 32, 1
+    # GAT encoder: input layer + (num_layers-2) residual hidden layers + output
+    # layer (heads averaged, not concatenated, down to embed_dim).
+    convs = gat_layer_params(in_channels, hidden_per_head, heads)
+    convs += (num_layers - 2) * gat_layer_params(hidden, hidden_per_head, heads)
+    convs += gat_layer_params(hidden, embed_dim, heads, concat=False)
 
-    l1_out = l1_per_head * l1_heads
-    l2_out = l2_per_head * l2_heads
+    # one LayerNorm (scale+bias = 2×width) after each GAT layer.
+    norms = (num_layers - 1) * (2 * hidden) + (2 * embed_dim)
 
-    gat1 = gat_layer_params(in_channels, l1_per_head, l1_heads)
-    gat2 = gat_layer_params(l1_out, l2_per_head, l2_heads)
-    classifier = l2_out * num_classes + num_classes  # weight + bias
-    total = gat1 + gat2 + classifier
-
-    print("\n[build] theoretical local T-GAT parameter count")
-    print(f"  input                                    : {in_channels} features")
-    print(
-        f"  GAT layer 1  (heads={l1_heads}, {l1_per_head}/head -> {l1_out:>3}) "
-        f"   : {gat1:>9,}"
+    # edge MLP over [z_src ‖ z_dst] (2·embed): Linear -> LayerNorm -> Linear -> Linear
+    classifier = (
+        (2 * embed_dim) * (2 * embed_dim)
+        + (2 * embed_dim)  # Linear(2e -> 2e)
+        + (2 * (2 * embed_dim))  # LayerNorm(2e)
+        + (2 * embed_dim) * embed_dim
+        + embed_dim  # Linear(2e -> e)
+        + embed_dim * num_classes
+        + num_classes  # Linear(e -> C)
     )
+    total = convs + norms + classifier
+
+    print("\n[build] local GAT parameter count (default LocalGAT)")
+    print(f"  input               : {in_channels} features -> {num_classes} classes")
     print(
-        f"  GAT layer 2  (heads={l2_heads}, {l2_per_head}/head -> {l2_out:>3}) "
-        f"  : {gat2:>9,}"
+        f"  convs   ({num_layers}× GATConv, heads={heads}, {hidden_per_head}/head) "
+        f": {convs:>9,}"
     )
+    print(f"  norms   ({num_layers}× LayerNorm)                  : {norms:>9,}")
     print(
-        f"  Linear classifier  ({l2_out} -> {num_classes})       "
-        f"  : {classifier:>9,}"
+        f"  classifier  (edge MLP 2·{embed_dim} -> {embed_dim} -> {num_classes})  "
+        f": {classifier:>9,}"
     )
-    print(f"  {'TOTAL':>54}: {total:>9,}")
+    print(f"  {'TOTAL':>36}: {total:>9,}")
 
     return {
         "input_features": in_channels,
         "num_classes": num_classes,
-        "layers": {
-            "gat1": {
-                "heads": l1_heads,
-                "out_per_head": l1_per_head,
-                "out_channels": l1_out,
-                "params": gat1,
-            },
-            "gat2": {
-                "heads": l2_heads,
-                "out_per_head": l2_per_head,
-                "out_channels": l2_out,
-                "params": gat2,
-            },
-            "classifier": {
-                "in_channels": l2_out,
-                "out_channels": num_classes,
-                "params": classifier,
-            },
+        "architecture": {
+            "hidden_per_head": hidden_per_head,
+            "heads": heads,
+            "num_layers": num_layers,
+            "embed_dim": embed_dim,
+        },
+        "params": {
+            "convs": convs,
+            "norms": norms,
+            "classifier": classifier,
         },
         "total_params": total,
     }
@@ -292,6 +305,6 @@ def run(
     param_report = report_parameter_count(
         in_channels=len(feature_cols), num_classes=len(label_map)
     )
-    param_path = CLIENTS_DIR / "tgat_param_count.json"
+    param_path = CLIENTS_DIR / "gat_param_count.json"
     param_path.write_text(json.dumps(param_report, indent=2))
     print(f"[build] wrote {param_path.relative_to(PROJECT_ROOT)}")

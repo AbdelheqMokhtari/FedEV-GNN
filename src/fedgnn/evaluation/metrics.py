@@ -121,6 +121,24 @@ def attack_detection_recall(
     return detected / n_attacks
 
 
+def confusion_matrix(
+    preds: torch.Tensor, targets: torch.Tensor, num_classes: int
+) -> list[list[int]]:
+    """Confusion matrix as nested integer lists (JSON-friendly).
+
+    ``cm[i][j]`` = number of edges whose **true** label is ``i`` and whose
+    **predicted** label is ``j``. So rows are indexed by truth and columns by
+    prediction: each row sums to that class's support, and the diagonal holds the
+    correct hits. Built with a single ``bincount`` over the flattened ``i*C+j``
+    indices (no scikit-learn, stays on the ``gnn`` extra only).
+    """
+    cm = torch.zeros(num_classes * num_classes, dtype=torch.long)
+    if targets.numel():
+        flat = targets.to(torch.long) * num_classes + preds.to(torch.long)
+        cm = torch.bincount(flat, minlength=num_classes * num_classes)
+    return cm.reshape(num_classes, num_classes).tolist()
+
+
 def per_class_report(
     preds: torch.Tensor, targets: torch.Tensor, num_classes: int
 ) -> dict[int, dict[str, float]]:

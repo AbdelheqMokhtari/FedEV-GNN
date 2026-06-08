@@ -1,0 +1,278 @@
+{
+  "device": "cuda",
+  "num_classes": 10,
+  "clients": [
+    {
+      "client": "client_00",
+      "hub_ip": "192.168.1.184",
+      "device": "cuda",
+      "n_nodes": 1158,
+      "n_edges": 283814,
+      "in_features": 55,
+      "n_train_edges": 198668,
+      "n_val_edges": 42573,
+      "n_test_edges": 42573,
+      "n_communities": 3,
+      "model_params": 121994,
+      "model_mb": 0.465,
+      "train_state_mb": 1.861,
+      "param_breakdown": [
+        {
+          "module": "convs",
+          "params": 114208
+        },
+        {
+          "module": "norms",
+          "params": 1088
+        },
+        {
+          "module": "classifier",
+          "params": 6698
+        }
+      ],
+      "graph_tensors_mb": 66.285,
+      "host_ram_peak_mb": 928.1,
+      "flops_per_epoch": 11755676928,
+      "flops_per_round": 58778384640,
+      "gpu_peak_mb": 1545.8
+    },
+    {
+      "client": "client_01",
+      "hub_ip": "192.168.1.195",
+      "device": "cuda",
+      "n_nodes": 578,
+      "n_edges": 102993,
+      "in_features": 55,
+      "n_train_edges": 72093,
+      "n_val_edges": 15450,
+      "n_test_edges": 15450,
+      "n_communities": 4,
+      "model_params": 121994,
+      "model_mb": 0.465,
+      "train_state_mb": 1.861,
+      "param_breakdown": [
+        {
+          "module": "convs",
+          "params": 114208
+        },
+        {
+          "module": "norms",
+          "params": 1088
+        },
+        {
+          "module": "classifier",
+          "params": 6698
+        }
+      ],
+      "graph_tensors_mb": 24.087,
+      "host_ram_peak_mb": 41.0,
+      "flops_per_epoch": 4367951744,
+      "flops_per_round": 21839758720,
+      "gpu_peak_mb": 576.1
+    },
+    {
+      "client": "client_02",
+      "hub_ip": "192.168.1.184",
+      "device": "cuda",
+      "n_nodes": 618,
+      "n_edges": 76773,
+      "in_features": 55,
+      "n_train_edges": 53743,
+      "n_val_edges": 11515,
+      "n_test_edges": 11515,
+      "n_communities": 3,
+      "model_params": 121994,
+      "model_mb": 0.465,
+      "train_state_mb": 1.861,
+      "param_breakdown": [
+        {
+          "module": "convs",
+          "params": 114208
+        },
+        {
+          "module": "norms",
+          "params": 1088
+        },
+        {
+          "module": "classifier",
+          "params": 6698
+        }
+      ],
+      "graph_tensors_mb": 17.994,
+      "host_ram_peak_mb": 26.8,
+      "flops_per_epoch": 3376881024,
+      "flops_per_round": 16884405120,
+      "gpu_peak_mb": 435.9
+    },
+    {
+      "client": "client_03",
+      "hub_ip": "192.168.1.1",
+      "device": "cuda",
+      "n_nodes": 303,
+      "n_edges": 63134,
+      "in_features": 55,
+      "n_train_edges": 44196,
+      "n_val_edges": 9469,
+      "n_test_edges": 9469,
+      "n_communities": 4,
+      "model_params": 121994,
+      "model_mb": 0.465,
+      "train_state_mb": 1.861,
+      "param_breakdown": [
+        {
+          "module": "convs",
+          "params": 114208
+        },
+        {
+          "module": "norms",
+          "params": 1088
+        },
+        {
+          "module": "classifier",
+          "params": 6698
+        }
+      ],
+      "graph_tensors_mb": 14.755,
+      "host_ram_peak_mb": 0.1,
+      "flops_per_epoch": 2644370688,
+      "flops_per_round": 13221853440,
+      "gpu_peak_mb": 357.1
+    },
+    {
+      "client": "client_04",
+      "hub_ip": "192.168.1.1",
+      "device": "cuda",
+      "n_nodes": 490,
+      "n_edges": 124526,
+      "in_features": 55,
+      "n_train_edges": 87167,
+      "n_val_edges": 18680,
+      "n_test_edges": 18679,
+      "n_communities": 3,
+      "model_params": 121994,
+      "model_mb": 0.465,
+      "train_state_mb": 1.861,
+      "param_breakdown": [
+        {
+          "module": "convs",
+          "params": 114208
+        },
+        {
+          "module": "norms",
+          "params": 1088
+        },
+        {
+          "module": "classifier",
+          "params": 6698
+        }
+      ],
+      "graph_tensors_mb": 29.08,
+      "host_ram_peak_mb": 18.5,
+      "flops_per_epoch": 5146226944,
+      "flops_per_round": 25731134720,
+      "gpu_peak_mb": 686.5
+    },
+    {
+      "client": "client_05",
+      "hub_ip": "192.168.1.195",
+      "device": "cuda",
+      "n_nodes": 360,
+      "n_edges": 24892,
+      "in_features": 55,
+      "n_train_edges": 17424,
+      "n_val_edges": 3734,
+      "n_test_edges": 3734,
+      "n_communities": 4,
+      "model_params": 121994,
+      "model_mb": 0.465,
+      "train_state_mb": 1.861,
+      "param_breakdown": [
+        {
+          "module": "convs",
+          "params": 114208
+        },
+        {
+          "module": "norms",
+          "params": 1088
+        },
+        {
+          "module": "classifier",
+          "params": 6698
+        }
+      ],
+      "graph_tensors_mb": 5.868,
+      "host_ram_peak_mb": 10.0,
+      "flops_per_epoch": 1198023168,
+      "flops_per_round": 5990115840,
+      "gpu_peak_mb": 153.8
+    },
+    {
+      "client": "client_06",
+      "hub_ip": "192.168.1.195",
+      "device": "cuda",
+      "n_nodes": 658,
+      "n_edges": 114991,
+      "in_features": 55,
+      "n_train_edges": 80493,
+      "n_val_edges": 17249,
+      "n_test_edges": 17249,
+      "n_communities": 4,
+      "model_params": 121994,
+      "model_mb": 0.465,
+      "train_state_mb": 1.861,
+      "param_breakdown": [
+        {
+          "module": "convs",
+          "params": 114208
+        },
+        {
+          "module": "norms",
+          "params": 1088
+        },
+        {
+          "module": "classifier",
+          "params": 6698
+        }
+      ],
+      "graph_tensors_mb": 26.896,
+      "host_ram_peak_mb": 36.0,
+      "flops_per_epoch": 4884973696,
+      "flops_per_round": 24424868480,
+      "gpu_peak_mb": 638.9
+    },
+    {
+      "client": "client_07",
+      "hub_ip": "192.168.1.31",
+      "device": "cuda",
+      "n_nodes": 970,
+      "n_edges": 206049,
+      "in_features": 55,
+      "n_train_edges": 144231,
+      "n_val_edges": 30909,
+      "n_test_edges": 30909,
+      "n_communities": 3,
+      "model_params": 121994,
+      "model_mb": 0.465,
+      "train_state_mb": 1.861,
+      "param_breakdown": [
+        {
+          "module": "convs",
+          "params": 114208
+        },
+        {
+          "module": "norms",
+          "params": 1088
+        },
+        {
+          "module": "classifier",
+          "params": 6698
+        }
+      ],
+      "graph_tensors_mb": 48.15,
+      "host_ram_peak_mb": 73.5,
+      "flops_per_epoch": 8618164096,
+      "flops_per_round": 43090820480,
+      "gpu_peak_mb": 1128.2
+    }
+  ]
+}

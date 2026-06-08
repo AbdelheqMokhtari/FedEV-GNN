@@ -2,7 +2,8 @@
 
 Each client owns one ``graph.pt``.
 
-* ``x``          per-node aggregated flow features, shape ``[N_nodes, 26]``
+* ``x``          per-node aggregated flow features, shape ``[N_nodes, F]`` where
+  ``F`` is the number of selected (engineered) features — see ``selected_features.json``
 * ``edge_index`` ``[2, N_edges]`` (one edge per NetFlow record)
 * ``y``          **per-edge** class labels, shape ``[N_edges]``  ← labels live on
   the flows, not the nodes, so intrusion detection is *edge classification*.
@@ -25,30 +26,67 @@ from torch_geometric.data import Data
 from torch_geometric.nn import GATConv
 
 from fedgnn.data.graph_builder.edge_graph import aggregate_node_features
-from fedgnn.evaluation import count_parameters, count_training_flops, evaluate_model
+from fedgnn.evaluation import (
+    count_parameters,
+    count_training_flops,
+    predict_model,
+    report_from_predictions,
+    track_resources,
+)
 
 # src/fedgnn/train/client.py -> parents[3] == repo root
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 CLIENTS_DIR = PROJECT_ROOT / "data" / "clients"
 PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 
-IN_CHANNELS = 26
+# Fallback default only; the real in-channel count is read from the graph at build
+# time (``self.graph.x.shape[1]``), so this tracks the selected-feature set size.
+IN_CHANNELS = 55
 EMBED_DIM = 32
 TIME_COL = "FLOW_START_MILLISECONDS"
 LABEL_COL = "y_multiclass"
 
 
-def _inverse_frequency_weights(targets: torch.Tensor, num_classes: int) -> torch.Tensor:
-    """Per-class loss weights ~ inverse frequency (absent classes -> 0).
+CLASS_WEIGHT_SCHEMES = ("sqrt_inverse", "inverse", "none")
 
-    Keeps the per-edge cross-entropy from collapsing onto the dominant
-    ``benign``/``ddos`` flows on each client.
+
+def _compute_class_weights(
+    targets: torch.Tensor, num_classes: int, scheme: str = "sqrt_inverse"
+) -> torch.Tensor | None:
+    """Per-class cross-entropy weights (absent classes -> 0), normalised to mean 1.
+
+    Keeps the loss from collapsing onto the dominant ``benign``/``ddos`` flows
+    without over-rewarding the rarest classes. ``scheme``:
+
+    * ``inverse``      — w_c ∝ 1/count_c. Strong, but a class 1000× rarer gets
+      1000× the weight, so the model over-predicts rare attacks → many false
+      positives.
+    * ``sqrt_inverse`` — w_c ∝ 1/sqrt(count_c) (**default, softened**). Same
+      1000×-rarer class gets only ~31× weight: still corrects imbalance but far
+      less trigger-happy, so benign precision recovers.
+    * ``none``         — uniform (no weighting).
+
+    Weights are scaled to average 1 over the present classes so the loss
+    magnitude (and thus the effective learning rate) is comparable across schemes.
     """
+    if scheme == "none":
+        return None
+    if scheme not in CLASS_WEIGHT_SCHEMES:
+        raise ValueError(
+            f"class_weight must be one of {CLASS_WEIGHT_SCHEMES}, got {scheme!r}"
+        )
+
     counts = torch.bincount(targets, minlength=num_classes).float()
     present = counts > 0
     weights = torch.zeros(num_classes, dtype=torch.float, device=counts.device)
-    if present.any():
-        weights[present] = counts.sum() / (counts[present] * int(present.sum()))
+    if not present.any():
+        return weights
+
+    if scheme == "inverse":
+        raw = 1.0 / counts[present]
+    else:  # sqrt_inverse
+        raw = 1.0 / torch.sqrt(counts[present])
+    weights[present] = raw / raw.mean()  # normalise to mean 1 over present classes
     return weights
 
 
@@ -207,7 +245,8 @@ class ClientPayload:
     state_dict: dict[str, torch.Tensor]  # local model weights (on CPU)
     community_embeddings: torch.Tensor  # [n_communities, embed_dim] (CPU)
     community_sizes: list[int]  # node count per community (for auditing)
-    val_score: float  # local validation metric (macro-F1 or accuracy)
+    val_score: float  # local validation score on the --metric (logged)
+    agg_score: float  # attack-detection skill -> drives the FedAvg weight
     num_train_edges: int  # for auditing only — NOT used for weighting
 
 
@@ -217,9 +256,11 @@ class ClientPayload:
 class FederatedClient:
     """One simulated edge device: owns a graph, a local model, and a 3-way split.
 
-    Edges (flows) are split into **train / val / test**. By default the split is
-    *temporal* (earliest flows train, latest flows test) which mirrors real IDS
-    deployment.
+    Edges (flows) are split into **train / val / test**. The default split is
+    *stratified* (per-class balanced) so every class is present in all three
+    splits — the fix for ToN-IoT's time-localised attack campaigns, which made a
+    plain ``temporal`` split strand whole attack classes in train-only or
+    test-only and pinned ``macro_attack_recall`` at 0 (see ``_make_split``).
     """
 
     def __init__(
@@ -229,7 +270,7 @@ class FederatedClient:
         device: torch.device | str = "cpu",
         val_ratio: float = 0.15,
         test_ratio: float = 0.15,
-        split: str = "temporal",
+        split: str = "stratified",
         lr: float = 1e-3,
         weight_decay: float = 5e-4,
         dropout: float = 0.5,
@@ -240,6 +281,7 @@ class FederatedClient:
         louvain_resolution: float = 1.0,
         metric: str = "balanced_accuracy",
         use_class_weights: bool = True,
+        class_weight: str = "sqrt_inverse",
         benign_class: int = 0,
         seed: int = 42,
     ) -> None:
@@ -251,6 +293,8 @@ class FederatedClient:
         self.weight_decay = weight_decay
         self.metric = metric
         self.use_class_weights = use_class_weights
+        # "none" scheme or use_class_weights=False both mean uniform weighting.
+        self.class_weight = class_weight if use_class_weights else "none"
         self.benign_class = benign_class
         self.split_kind = split
 
@@ -291,20 +335,28 @@ class FederatedClient:
         ).to(self.device)
         self.num_params = count_parameters(self.model)
 
-        # Inverse-frequency class weights from the local *training* edges only.
+        # Class weights from the local *training* edges only (leak-free).
         self._class_weights = None
-        if use_class_weights:
+        if self.class_weight != "none":
             y_train = self.graph.y[self.train_mask]
-            self._class_weights = _inverse_frequency_weights(y_train, num_classes).to(
-                self.device
-            )
+            weights = _compute_class_weights(y_train, num_classes, self.class_weight)
+            if weights is not None:
+                self._class_weights = weights.to(self.device)
 
-        # Computational-cost accounting (filled by train()).
+        # Computational-cost accounting (filled by train()/evaluate()).
         self.last_flops_per_epoch = 0
         self.last_flops_round = 0
         self.cumulative_flops = 0
         self.last_report: dict | None = None
         self.test_report: dict | None = None
+        # Raw (preds, targets) from the most recent eval, kept on CPU so the server
+        # can POOL them across clients into one honest multi-class report.
+        self.last_preds: torch.Tensor | None = None
+        self.last_targets: torch.Tensor | None = None
+        self.test_preds: torch.Tensor | None = None
+        self.test_targets: torch.Tensor | None = None
+        self.last_train_usage = None  # ResourceUsage from the last train()
+        self.last_eval_usage = None  # ResourceUsage from the last evaluate()
 
     # construction helpers
 
@@ -335,8 +387,28 @@ class FederatedClient:
     def _make_split(
         self, graph: Data, val_ratio: float, test_ratio: float, split: str, seed: int
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Ordered 3-way edge split -> (train_mask, val_mask, test_mask)."""
+        """3-way edge split -> (train_mask, val_mask, test_mask).
+
+        Four strategies (``split``):
+
+        * ``stratified`` (default) — **per-class** random split: within each class
+          the edges are shuffled and cut by ratio, so every class with >=3 samples
+          lands in train *and* val *and* test. This is the fix for the degenerate
+          splits that pinned ``macro_attack_recall`` at 0 — on ToN-IoT the
+          time-localised attack campaigns made a plain ``temporal`` split put whole
+          attack classes in train-only or test-only (see docs).
+        * ``stratified_temporal`` — same per-class balancing, but within each class
+          the *earliest* flows go to train and the *latest* to test, keeping a
+          past->future flavour without orphaning any class.
+        * ``temporal`` — global past->future order (earliest train, latest test).
+        * ``random`` — global random order.
+        """
         n_edges = int(graph.edge_index.shape[1])
+        if split in ("stratified", "stratified_temporal"):
+            return self._stratified_split(
+                graph, val_ratio, test_ratio, split, seed, n_edges
+            )
+
         n_test = max(1, int(round(n_edges * test_ratio)))
         n_val = max(1, int(round(n_edges * val_ratio)))
         n_train = n_edges - n_val - n_test
@@ -363,13 +435,82 @@ class FederatedClient:
         train_idx = order[:n_train]
         val_idx = order[n_train : n_train + n_val]
         test_idx = order[n_train + n_val :]
+        return (
+            self._to_mask(train_idx, n_edges),
+            self._to_mask(val_idx, n_edges),
+            self._to_mask(test_idx, n_edges),
+        )
 
-        def _mask(idx: np.ndarray) -> torch.Tensor:
-            m = torch.zeros(n_edges, dtype=torch.bool)
-            m[torch.from_numpy(idx.copy())] = True
-            return m
+    def _stratified_split(
+        self,
+        graph: Data,
+        val_ratio: float,
+        test_ratio: float,
+        split: str,
+        seed: int,
+        n_edges: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Per-class balanced split so every class spans train/val/test.
 
-        return _mask(train_idx), _mask(val_idx), _mask(test_idx)
+        Classes too small to span all three splits degrade gracefully: a 2-sample
+        class goes train+val, a singleton goes to train only — so a rare attack is
+        always *learnable*, never stranded in test alone.
+        """
+        y = graph.y.cpu().numpy()
+        rng = np.random.default_rng(seed + self.client_id)
+
+        times = None
+        if split == "stratified_temporal":
+            times = self._edge_times(graph)
+            if times is None:
+                print(
+                    f"[client_{self.client_id:02d}] no usable timestamps — "
+                    "falling back to a stratified random split"
+                )
+
+        train_parts, val_parts, test_parts = [], [], []
+        for c in np.unique(y):
+            cls_idx = np.where(y == c)[0]
+            # order within the class: by time (stratified_temporal) or shuffled
+            if times is not None:
+                cls_idx = cls_idx[np.argsort(times[cls_idx], kind="stable")]
+            else:
+                cls_idx = rng.permutation(cls_idx)
+
+            n = len(cls_idx)
+            if n == 1:  # singleton: train it (can't also val/test)
+                train_parts.append(cls_idx)
+                continue
+            if n == 2:  # split train/val, skip test
+                train_parts.append(cls_idx[:1])
+                val_parts.append(cls_idx[1:])
+                continue
+
+            n_test = max(1, int(round(n * test_ratio)))
+            n_val = max(1, int(round(n * val_ratio)))
+            n_train = n - n_val - n_test
+            if n_train < 1:  # tiny class: guarantee >=1 train, share the rest
+                n_train = 1
+                n_val = (n - 1) // 2
+                n_test = n - 1 - n_val
+            train_parts.append(cls_idx[:n_train])
+            val_parts.append(cls_idx[n_train : n_train + n_val])
+            test_parts.append(cls_idx[n_train + n_val :])
+
+        def _cat(parts: list[np.ndarray]) -> np.ndarray:
+            return np.concatenate(parts) if parts else np.empty(0, dtype=np.int64)
+
+        return (
+            self._to_mask(_cat(train_parts), n_edges),
+            self._to_mask(_cat(val_parts), n_edges),
+            self._to_mask(_cat(test_parts), n_edges),
+        )
+
+    def _to_mask(self, idx: np.ndarray, n_edges: int) -> torch.Tensor:
+        m = torch.zeros(n_edges, dtype=torch.bool)
+        if len(idx):
+            m[torch.from_numpy(np.asarray(idx, dtype=np.int64))] = True
+        return m
 
     def _rng_perm(self, n_edges: int, seed: int) -> np.ndarray:
         rng = np.random.default_rng(seed + self.client_id)
@@ -419,10 +560,12 @@ class FederatedClient:
     def train(self, epochs: int) -> dict:
         """Run ``epochs`` of full-batch local training.
 
-        Returns a record with the final loss and the computational-cost figures
-        (FLOPs per epoch / per round / cumulative). A fresh optimiser is created
-        each round (standard FedAvg): local optimiser state is not carried across
-        rounds because the weights are reset from the global model every round.
+        Returns a record with the final loss, the computational-cost figures
+        (FLOPs per epoch / per round / cumulative), and the **measured** resource
+        cost of the local training (wall time, CPU %, process RSS, peak GPU mem) so
+        ``Results/`` captures what each round actually cost. A fresh optimiser is
+        created each round (standard FedAvg): local optimiser state is not carried
+        across rounds because the weights are reset from the global model every round.
         """
         optimizer = torch.optim.Adam(
             self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay
@@ -437,50 +580,58 @@ class FederatedClient:
 
         self.model.train()
         last_loss = 0.0
-        for _ in range(epochs):
-            optimizer.zero_grad()
-            logits, _ = self.model(x, edge_index)
-            loss = criterion(logits[self.train_mask], y[self.train_mask])
-            loss.backward()
-            optimizer.step()
-            last_loss = float(loss.detach())
+        # Time/measure only the actual training loop (excludes the FLOPs probe).
+        with track_resources(self.device) as res:
+            for _ in range(epochs):
+                optimizer.zero_grad()
+                logits, _ = self.model(x, edge_index)
+                loss = criterion(logits[self.train_mask], y[self.train_mask])
+                loss.backward()
+                optimizer.step()
+                last_loss = float(loss.detach())
 
         self.last_flops_round = self.last_flops_per_epoch * epochs
         self.cumulative_flops += self.last_flops_round
+        self.last_train_usage = res.usage
         return {
             "final_loss": last_loss,
             "local_epochs": epochs,
             "flops_per_epoch": self.last_flops_per_epoch,
             "flops_this_round": self.last_flops_round,
             "cumulative_flops": self.cumulative_flops,
+            **res.usage.as_record(prefix="train_"),
         }
 
     def evaluate(self, mask: torch.Tensor | None = None) -> float:
         """Validation score on the held-out edges (macro-F1 by default).
 
-        Caches the full report on ``self.last_report`` for results logging.
+        Caches the full report on ``self.last_report`` and the measured inference
+        cost on ``self.last_eval_usage`` for results logging.
         """
         mask = self.val_mask if mask is None else mask
-        self.last_report = evaluate_model(
-            self.model,
-            self.graph,
-            mask,
-            self.num_classes,
-            self.metric,
-            self.benign_class,
-        )
+        with track_resources(self.device) as res:
+            preds, targets = predict_model(self.model, self.graph, mask)
+            self.last_report = report_from_predictions(
+                preds, targets, self.num_classes, self.metric, self.benign_class
+            )
+        self.last_preds, self.last_targets = preds.cpu(), targets.cpu()
+        self.last_eval_usage = res.usage
         return self.last_report["score"]
 
     def evaluate_test(self) -> dict:
-        """Full report on the held-out **test** edges; caches it on the client."""
-        self.test_report = evaluate_model(
-            self.model,
-            self.graph,
-            self.test_mask,
-            self.num_classes,
-            self.metric,
-            self.benign_class,
-        )
+        """Full report on the held-out **test** edges; caches it on the client.
+
+        Folds the measured inference cost into the returned report so each client's
+        ``results.json["test"]`` records its test-time resource usage.
+        """
+        with track_resources(self.device) as res:
+            preds, targets = predict_model(self.model, self.graph, self.test_mask)
+            self.test_report = report_from_predictions(
+                preds, targets, self.num_classes, self.metric, self.benign_class
+            )
+        self.test_preds, self.test_targets = preds.cpu(), targets.cpu()
+        self.last_eval_usage = res.usage
+        self.test_report.update(res.usage.as_record(prefix="inference_"))
         return self.test_report
 
     @torch.no_grad()
@@ -506,13 +657,21 @@ class FederatedClient:
     # extraction API
 
     def extract_payload(self) -> ClientPayload:
-        """Bundle weights + community embeddings + validation score for the server."""
+        """Bundle weights + community embeddings + scores for the server."""
+        val_score = self.evaluate()  # --metric score on val (also fills last_report)
+        # The FedAvg weight is driven by attack-detection skill, NOT the --metric:
+        # under the non-IID split a benign-only client trivially maxes balanced
+        # accuracy and would dominate the merge (pulling the global model to
+        # "always benign"). macro_attack_recall is 0 when a client sees no attacks,
+        # so such a client correctly falls to the alpha floor weight.
+        agg_score = float(self.last_report["macro_attack_recall"])
         return ClientPayload(
             client_id=self.client_id,
             state_dict=self.get_weights(),
             community_embeddings=self.community_embeddings(),
             community_sizes=self.community_sizes,
-            val_score=self.evaluate(),
+            val_score=val_score,
+            agg_score=agg_score,
             num_train_edges=int(self.train_mask.sum()),
         )
 
