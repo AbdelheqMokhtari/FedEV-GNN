@@ -15,6 +15,7 @@ them into evaluation figures under ``Figures/<exp>/``:
 from fedgnn.validation.loader import (
     ClientResults,
     ExperimentResults,
+    binary_confusion,
     discover_experiments,
     latest_experiment,
     load_experiment,
@@ -24,6 +25,7 @@ from fedgnn.validation.plots import render_all
 __all__ = [
     "ClientResults",
     "ExperimentResults",
+    "binary_confusion",
     "discover_experiments",
     "latest_experiment",
     "load_experiment",

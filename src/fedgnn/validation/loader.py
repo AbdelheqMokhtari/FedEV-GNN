@@ -53,6 +53,13 @@ class ClientResults:
         """Per-round values for ``key`` (e.g. ``final_loss``, ``global_macro_f1``)."""
         return [r.get(key) for r in self.rounds]
 
+    @property
+    def confusion_matrix(self) -> list[list[int]] | None:
+        """Held-out test confusion matrix (row=true, col=pred), if recorded."""
+        if self.test and self.test.get("confusion_matrix"):
+            return self.test["confusion_matrix"]
+        return None
+
 
 @dataclass
 class ExperimentResults:
@@ -66,6 +73,10 @@ class ExperimentResults:
     test_aggregate: dict = field(default_factory=dict)
     selection_metric: str = "balanced_accuracy"
     evaluated_model: str = ""
+    num_classes: int = 0
+    benign_class: int = 0
+    label_names: list[str] = field(default_factory=list)
+    test_confusion: list[list[int]] | None = None  # aggregate, row=true col=pred
 
     # ── derived convenience views ───────────────────────────────────────────
 
@@ -73,6 +84,19 @@ class ExperimentResults:
     def has_test(self) -> bool:
         """True if the held-out test evaluation ran (clean completion)."""
         return bool(self.test_aggregate)
+
+    @property
+    def has_confusion(self) -> bool:
+        """True if at least one client (or the aggregate) has a stored CM."""
+        return self.test_confusion is not None or any(
+            c.confusion_matrix is not None for c in self.clients
+        )
+
+    def class_label(self, idx: int) -> str:
+        """Display name for a class index (falls back to the index itself)."""
+        if 0 <= idx < len(self.label_names):
+            return self.label_names[idx]
+        return str(idx)
 
     @property
     def n_rounds(self) -> int:
@@ -107,6 +131,40 @@ class ExperimentResults:
                     m: last.get(f"global_{m}", 0.0) for m in HEADLINE_METRICS
                 }
         return quality
+
+
+def binary_confusion(cm: list[list[int]], benign_class: int = 0) -> list[list[int]]:
+    """Collapse a multiclass CM into a 2×2 ``benign`` vs ``attack`` matrix.
+
+    Rows/cols are ``[benign, attack]``::
+
+        [[TN, FP],     TN: benign kept benign      FP: benign flagged as attack
+         [FN, TP]]     FN: attack missed (→benign) TP: attack caught as some attack
+    """
+    n = len(cm)
+    tn = cm[benign_class][benign_class]
+    fp = sum(cm[benign_class][j] for j in range(n) if j != benign_class)
+    fn = sum(cm[i][benign_class] for i in range(n) if i != benign_class)
+    tp = sum(
+        cm[i][j]
+        for i in range(n)
+        for j in range(n)
+        if i != benign_class and j != benign_class
+    )
+    return [[tn, fp], [fn, tp]]
+
+
+def _load_label_names(num_classes: int) -> list[str]:
+    """Class index → name from ``data/processed/label_map.json`` (best-effort)."""
+    path = Path("data/processed/label_map.json")
+    if not path.exists() or num_classes <= 0:
+        return []
+    label_map = json.loads(path.read_text())  # {name: index}
+    names = [str(i) for i in range(num_classes)]
+    for name, idx in label_map.items():
+        if 0 <= int(idx) < num_classes:
+            names[int(idx)] = name
+    return names
 
 
 def discover_experiments(results_root: str | Path) -> list[str]:
@@ -182,6 +240,22 @@ def load_experiment(
             f"(no client records and no server history in {results_dir}/)."
         )
 
+    config = metadata.get("config", {})
+    num_classes = int(config.get("num_classes", 0))
+    benign_class = int(config.get("benign_class", 0))
+
+    # aggregate CM: prefer the stored one, else sum any per-client test CMs.
+    test_confusion = test_doc.get("confusion_matrix")
+    if test_confusion is None and num_classes:
+        per_client_cms = [c.confusion_matrix for c in clients if c.confusion_matrix]
+        if per_client_cms:
+            agg = [[0] * num_classes for _ in range(num_classes)]
+            for cm in per_client_cms:
+                for i in range(num_classes):
+                    for j in range(num_classes):
+                        agg[i][j] += cm[i][j]
+            test_confusion = agg
+
     return ExperimentResults(
         name=name,
         results_dir=results_dir,
@@ -191,4 +265,8 @@ def load_experiment(
         test_aggregate=test_doc.get("aggregate", {}),
         selection_metric=selection_metric,
         evaluated_model=test_doc.get("evaluated_model", ""),
+        num_classes=num_classes,
+        benign_class=benign_class,
+        label_names=_load_label_names(num_classes),
+        test_confusion=test_confusion,
     )

@@ -25,6 +25,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import matplotlib
+import numpy as np
 
 matplotlib.use("Agg")  # headless: render straight to files, never a window
 
@@ -35,6 +36,7 @@ from fedgnn.validation.loader import (  # noqa: E402
     TEST_METRICS,
     ClientResults,
     ExperimentResults,
+    binary_confusion,
 )
 
 # Pretty labels for the metric keys used across the figures.
@@ -350,6 +352,127 @@ def plot_aggregation_weights(
     return _save(fig, out_dir, "aggregation_weights", fmt, dpi)
 
 
+# ── confusion matrices ──────────────────────────────────────────────────────
+
+
+def _involved_classes(cm: list[list[int]]) -> list[int]:
+    """Class indices that appear as a true row *or* a predicted column (non-empty).
+
+    Keeps each matrix compact: a client that only ever sees 4 classes draws a 4×4,
+    not a sparse 10×10. Always square (same indices on both axes) and never empty.
+    """
+    arr = np.asarray(cm)
+    rows = set(np.where(arr.sum(axis=1) > 0)[0].tolist())
+    cols = set(np.where(arr.sum(axis=0) > 0)[0].tolist())
+    idxs = sorted(rows | cols)
+    return idxs or list(range(len(cm)))
+
+
+def _draw_cm(ax, cm: list[list[int]], labels: list[str], title: str) -> None:
+    """Heatmap of one confusion matrix: colour = row-normalised recall, text = count.
+
+    Colouring by recall (each row ÷ its support) makes the diagonal readable even
+    when class sizes span orders of magnitude — a rare attack with 100% recall is
+    as dark as the benign block. The raw counts are annotated in each cell.
+    """
+    arr = np.asarray(cm, dtype=float)
+    row_sums = arr.sum(axis=1, keepdims=True)
+    norm = np.divide(arr, row_sums, out=np.zeros_like(arr), where=row_sums > 0)
+
+    im = ax.imshow(norm, cmap="Blues", vmin=0.0, vmax=1.0, aspect="auto")
+    ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="recall (row-norm.)")
+
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.set_yticks(range(len(labels)))
+    ax.set_yticklabels(labels)
+    ax.set_xlabel("Predicted")
+    ax.set_ylabel("True")
+    ax.set_title(title)
+
+    for i in range(arr.shape[0]):
+        for j in range(arr.shape[1]):
+            count = int(arr[i, j])
+            if count == 0:
+                continue
+            ax.text(
+                j,
+                i,
+                f"{count:,}",
+                ha="center",
+                va="center",
+                fontsize=7,
+                color="white" if norm[i, j] > 0.5 else "black",
+            )
+    ax.grid(False)
+
+
+def plot_client_confusion(
+    client: ClientResults,
+    exp: ExperimentResults,
+    out_dir: Path,
+    fmt: str = "png",
+    dpi: int = 120,
+) -> Path | None:
+    """One client's held-out **multiclass** confusion matrix (per attack type)."""
+    cm = client.confusion_matrix
+    if not cm:
+        return None
+    idxs = _involved_classes(cm)
+    sub = [[cm[i][j] for j in idxs] for i in idxs]
+    labels = [exp.class_label(i) for i in idxs]
+
+    fig, ax = plt.subplots(figsize=(max(6, len(idxs) * 0.9), max(5, len(idxs) * 0.8)))
+    _draw_cm(ax, sub, labels, f"{client.name} — confusion (hub {client.hub_ip})")
+    return _save(fig, out_dir, f"{client.name}_confusion", fmt, dpi)
+
+
+def plot_client_confusion_binary(
+    client: ClientResults,
+    exp: ExperimentResults,
+    out_dir: Path,
+    fmt: str = "png",
+    dpi: int = 120,
+) -> Path | None:
+    """One client's **binary** (benign vs attack) confusion matrix."""
+    cm = client.confusion_matrix
+    if not cm:
+        return None
+    bcm = binary_confusion(cm, exp.benign_class)
+    fig, ax = plt.subplots(figsize=(5, 4.2))
+    _draw_cm(ax, bcm, ["benign", "attack"], f"{client.name} — benign vs attack")
+    return _save(fig, out_dir, f"{client.name}_confusion_binary", fmt, dpi)
+
+
+def plot_server_confusion(
+    exp: ExperimentResults, out_dir: Path, fmt: str = "png", dpi: int = 120
+) -> Path | None:
+    """Aggregate (all clients summed) **multiclass** confusion matrix."""
+    cm = exp.test_confusion
+    if not cm:
+        return None
+    idxs = _involved_classes(cm)
+    sub = [[cm[i][j] for j in idxs] for i in idxs]
+    labels = [exp.class_label(i) for i in idxs]
+
+    fig, ax = plt.subplots(figsize=(max(6, len(idxs) * 0.9), max(5, len(idxs) * 0.8)))
+    _draw_cm(ax, sub, labels, f"{exp.name} — global model confusion (all clients)")
+    return _save(fig, out_dir, "confusion", fmt, dpi)
+
+
+def plot_server_confusion_binary(
+    exp: ExperimentResults, out_dir: Path, fmt: str = "png", dpi: int = 120
+) -> Path | None:
+    """Aggregate **binary** (benign vs attack) confusion matrix."""
+    cm = exp.test_confusion
+    if not cm:
+        return None
+    bcm = binary_confusion(cm, exp.benign_class)
+    fig, ax = plt.subplots(figsize=(5, 4.2))
+    _draw_cm(ax, bcm, ["benign", "attack"], f"{exp.name} — global benign vs attack")
+    return _save(fig, out_dir, "confusion_binary", fmt, dpi)
+
+
 # ── orchestration ───────────────────────────────────────────────────────────
 
 
@@ -381,10 +504,14 @@ def render_all(
     for client in exp.clients:
         _add(plot_client_loss(client, clients_dir, fmt, dpi))
         _add(plot_client_metrics(client, clients_dir, fmt, dpi))
+        _add(plot_client_confusion(client, exp, clients_dir, fmt, dpi))
+        _add(plot_client_confusion_binary(client, exp, clients_dir, fmt, dpi))
 
     # server / global model
     _add(plot_global_metrics_evolution(exp, server_dir, fmt, dpi))
     _add(plot_server_quality(exp, server_dir, fmt, dpi))
     _add(plot_aggregation_weights(exp, server_dir, fmt, dpi))
+    _add(plot_server_confusion(exp, server_dir, fmt, dpi))
+    _add(plot_server_confusion_binary(exp, server_dir, fmt, dpi))
 
     return written

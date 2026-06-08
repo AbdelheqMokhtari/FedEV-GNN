@@ -63,12 +63,29 @@ def _cmd_list(args: argparse.Namespace) -> None:
 
 def _render_one(name: str, args: argparse.Namespace) -> None:
     exp = load_experiment(name, args.results_dir)
+
+    # Confusion matrices: prefer the ones stored at train time; for legacy runs
+    # that predate CM storage, replay inference to recover them (needs gnn extra).
+    if not exp.has_confusion and not args.no_recompute and exp.has_test:
+        from fedgnn.validation.confusion import recompute_confusions
+
+        print(f"[validate] {name}: no stored confusion matrix — recomputing …")
+        if not recompute_confusions(
+            exp, args.models_dir, args.clients_dir, device=args.device
+        ):
+            print(
+                f"[validate] {name}: could not recompute (need the gnn extra + "
+                f"{args.models_dir}/{name}/server checkpoint + {args.clients_dir}/); "
+                "confusion figures skipped"
+            )
+
     paths = render_all(exp, args.figures_dir, fmt=args.format, dpi=args.dpi)
     out_dir = Path(args.figures_dir) / name
     print(
         f"[validate] {name}: {len(paths)} figures -> {out_dir}/ "
         f"(clients={len(exp.clients)}, rounds={exp.n_rounds}, "
-        f"test={'yes' if exp.has_test else 'no'})"
+        f"test={'yes' if exp.has_test else 'no'}, "
+        f"confusion={'yes' if exp.has_confusion else 'no'})"
     )
     if args.verbose:
         for p in paths:
@@ -138,6 +155,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="figure file format",
     )
     p_plot.add_argument("--dpi", type=int, default=120, help="raster output DPI")
+    p_plot.add_argument(
+        "--no-recompute",
+        action="store_true",
+        help="don't replay inference for legacy runs without stored confusion "
+        "matrices (skip those figures instead)",
+    )
+    p_plot.add_argument(
+        "--models_dir",
+        type=str,
+        default="Models",
+        help="root of experiment checkpoints (for confusion-matrix recompute)",
+    )
+    p_plot.add_argument(
+        "--clients_dir",
+        type=str,
+        default="data/clients",
+        help="federated client graphs (for confusion-matrix recompute)",
+    )
+    p_plot.add_argument(
+        "--device",
+        type=str,
+        default="cpu",
+        help="device for confusion-matrix recompute (cpu or cuda)",
+    )
     p_plot.add_argument(
         "--verbose", action="store_true", help="print every figure path written"
     )
