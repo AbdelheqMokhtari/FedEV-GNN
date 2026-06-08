@@ -5,7 +5,7 @@ A single entrypoint with subcommands so each stage can be run consistently::
     fedgnn-data load [--sample | --processed | --split 0]
     fedgnn-data sample --rows 1000000    # raw -> data/samples/
     fedgnn-data clean                    # sample -> data/processed/
-    fedgnn-data select                   # validate & write 26-feature set
+    fedgnn-data select                   # validate & write the engineered feature set
     fedgnn-data split [--csv]            # hub partitioning -> data/clients/
     fedgnn-data build [--window-ms N]    # PyG graphs -> data/clients/*/graph*.pt
 
@@ -20,7 +20,11 @@ from pathlib import Path
 import polars as pl
 
 from fedgnn.data import graph_builder
-from fedgnn.data.federated_split import hub_splitter
+from fedgnn.data.federated_split import (
+    dirichlet_splitter,
+    hub_splitter,
+    threat_splitter,
+)
 from fedgnn.data.loaders import ToNIoTLoader
 from fedgnn.data.preprocessing import cleaning, feature_selection
 from fedgnn.data.preprocessing.cleaning import REFERENCE_COLS, TIME_COLS, TOPOLOGY_COLS
@@ -30,9 +34,15 @@ PROCESSED_DIR = ToNIoTLoader.PROJECT_ROOT / "data" / "processed"
 LABEL_COLS = ["Label", "Attack", "y_binary", "y_multiclass"]
 
 _GROUP_LABELS = {
-    "behavioral": "Behavioral",
+    "protocol": "Protocol",
+    "application": "Application (L7)",
+    "service": "Service / Port",
+    "tcp_state": "TCP State (flag bits)",
+    "volume": "Volume",
+    "volume_ratio": "Volume Ratios",
+    "size": "Packet Size",
     "temporal": "Temporal",
-    "content_volume": "Content & Volume",
+    "reachability": "Reachability (TTL)",
 }
 _W = 72
 _I = "    "
@@ -256,7 +266,21 @@ def _cmd_select(_args: argparse.Namespace) -> None:
 
 
 def _cmd_split(args: argparse.Namespace) -> None:
-    hub_splitter.run(n_clients=args.n_clients, csv=args.csv)
+    if args.strategy == "dirichlet":
+        dirichlet_splitter.run(
+            n_clients=args.n_clients, alpha=args.alpha, seed=args.seed, csv=args.csv
+        )
+    elif args.strategy == "threat":
+        if args.n_clients is not None and args.n_clients != threat_splitter.N_CLIENTS:
+            print(
+                f"[split] note: threat strategy uses {threat_splitter.N_CLIENTS}"
+                f" role-segments; ignoring --n-clients {args.n_clients}"
+            )
+        threat_splitter.run(csv=args.csv, seed=args.seed)
+    else:
+        hub_splitter.run(
+            n_clients=args.n_clients or hub_splitter.N_CLIENTS, csv=args.csv
+        )
 
 
 def _cmd_build(args: argparse.Namespace) -> None:
@@ -309,17 +333,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_clean.set_defaults(func=_cmd_clean)
 
-    p_select = sub.add_parser("select", help="write the fixed 26-feature set to JSON")
+    p_select = sub.add_parser(
+        "select", help="curate the engineered feature set -> selected_features.json"
+    )
     p_select.set_defaults(func=_cmd_select)
 
     p_split = sub.add_parser(
-        "split", help="hub-centered graph partitioning → data/clients/"
+        "split", help="partition flows into federated clients → data/clients/"
+    )
+    p_split.add_argument(
+        "--strategy",
+        choices=["dirichlet", "threat", "hub"],
+        default="dirichlet",
+        help="dirichlet = non-IID label skew, all classes per client (default); "
+        "threat = one-attack-per-client segments; hub = traffic-ranked (near-IID)",
     )
     p_split.add_argument(
         "--n-clients",
         type=int,
-        default=10,
-        help="number of federated clients / hubs (default 10)",
+        default=None,
+        help="number of clients (dirichlet/hub; threat uses a fixed 8 segments)",
+    )
+    p_split.add_argument(
+        "--alpha",
+        type=float,
+        default=dirichlet_splitter.DEFAULT_ALPHA,
+        help="Dirichlet concentration (lower = sharper label skew; default 0.5)",
+    )
+    p_split.add_argument(
+        "--seed", type=int, default=42, help="random seed for the partition"
     )
     p_split.add_argument(
         "--csv",
