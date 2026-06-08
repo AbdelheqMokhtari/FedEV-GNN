@@ -18,6 +18,7 @@ dependencies = [
 fedgnn-data = "fedgnn.data.cli:main"
 fedgnn-train = "fedgnn.train.cli:main"
 fedgnn-validate = "fedgnn.validation.cli:main"
+fedgnn-monitor = "fedgnn.monitor.cli:main"
 
 [project.optional-dependencies]
 eda = [
